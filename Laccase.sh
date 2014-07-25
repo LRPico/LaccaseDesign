@@ -3747,3 +3747,203 @@ EOF
 pdb2gmx_mpi -f laccase.pdb -o laccase.gro -water spc -missing << EOF
 14
 EOF
+
+# Generando la caja de simulación
+editconf -f laccase.gro -o laccase_nbox.gro -bt dodecahedron -d 1.0
+
+# Añadiendo la mayor cantidad de solvente SPC
+genbox -cp laccase_nbox.gro -cs spc216.gro -p topol.top -o laccase_solv.gro
+
+# Generando el archivo de minimización de energía
+cat > minim.mdp << EOF
+; Parameters describing what to do, when to stop and what to save
+integrator	= steep		; Algorithm (steep = steepest descent minimization)
+emtol		= 1000.0  	; Stop minimization when the maximum force < 10.0 kJ/mol
+emstep      = 0.01      ; Energy step size
+nsteps		= 50000	  	; Maximum number of (minimization) steps to perform
+energygrps	= system	; Which energy group(s) to write to disk
+
+; Parameters describing how to find the neighbors of each atom and how to calculate the interactions
+nstlist		= 1		    ; Frequency to update the neighbor list and long range forces
+ns_type		= grid		; Method to determine neighbor list (simple, grid)
+rlist		= 1.0		; Cut-off for making neighbor list (short range forces)
+coulombtype	= PME		; Treatment of long range electrostatic interactions
+rcoulomb	= 1.0		; long range electrostatic cut-off
+rvdw		= 1.0		; long range Van der Waals cut-off
+pbc         = xyz 		; Periodic Boundary Conditions (yes/no)
+
+EOF
+
+# Configurando la adicion de los iones
+grompp -f minim.mdp -c laccase_solv.gro -p topol.top -o ions.tpr
+
+# Añadiendo los iones (Cu+1 como cation)
+genion -s ions.tpr -o laccase_ions.gro -p topol.top -pname CU1 -nname CL -neutral
+
+# Archivo de minimización
+cat > em.mdp << EOF
+; Parameters describing what to do, when to stop and what to save
+integrator	= steep		; Algorithm (steep = steepest descent minimization)
+emtol		= 1000.0  	; Stop minimization when the maximum force < 10.0 kJ/mol
+emstep      = 0.01      ; Energy step size
+nsteps		= 50000	  	; Maximum number of (minimization) steps to perform
+energygrps	= Protein DRG	; Which energy group(s) to write to disk
+
+; Parameters describing how to find the neighbors of each atom and how to calculate the interactions
+nstlist		= 1		    ; Frequency to update the neighbor list and long range forces
+ns_type		= grid		; Method to determine neighbor list (simple, grid)
+rlist		= 1.0		; Cut-off for making neighbor list (short range forces)
+coulombtype	= PME		; Treatment of long range electrostatic interactions
+rcoulomb	= 1.0		; long range electrostatic cut-off
+rvdw		= 1.0		; long range Van der Waals cut-off
+pbc		    = xyz 		; Periodic Boundary Conditions (yes/no)
+
+EOF
+
+# Archivo NVT
+cat > nvt << EOF
+title       = Protein-ligand complex NVT equilibration 
+define      = -DPOSRES_LIG  ; position restrain the protein and ligand
+; Run parameters
+integrator  = md        ; leap-frog integrator
+nsteps      = 50000     ; 2 * 50000 = 100 ps
+dt          = 0.002     ; 2 fs
+; Output control
+nstxout     = 100       ; save coordinates every 0.2 ps
+nstvout     = 100       ; save velocities every 0.2 ps
+nstenergy   = 100       ; save energies every 0.2 ps
+nstlog      = 100       ; update log file every 0.2 ps
+energygrps  = Protein DRG
+; Bond parameters
+continuation    = no            ; first dynamics run
+constraint_algorithm = lincs    ; holonomic constraints 
+constraints     = all-bonds     ; all bonds (even heavy atom-H bonds) constrained
+lincs_iter      = 1             ; accuracy of LINCS
+lincs_order     = 4             ; also related to accuracy
+; Neighborsearching
+ns_type     = grid      ; search neighboring grid cells
+nstlist     = 5         ; 10 fs
+rlist       = 0.9       ; short-range neighborlist cutoff (in nm)
+rcoulomb    = 0.9       ; short-range electrostatic cutoff (in nm)
+rvdw        = 1.4       ; short-range van der Waals cutoff (in nm)
+; Electrostatics
+coulombtype     = PME       ; Particle Mesh Ewald for long-range electrostatics
+pme_order       = 4         ; cubic interpolation
+fourierspacing  = 0.16      ; grid spacing for FFT
+; Temperature coupling is on
+tcoupl      = V-rescale                     ; modified Berendsen thermostat
+tc-grps     = Protein_DRG Water_and_ions    ; two coupling groups - more accurate
+tau_t       = 0.1   0.1                     ; time constant, in ps
+ref_t       = 300   300                     ; reference temperature, one for each group, in K
+; Pressure coupling is off
+pcoupl      = no        ; no pressure coupling in NVT
+; Periodic boundary conditions
+pbc         = xyz       ; 3-D PBC
+; Dispersion correction
+DispCorr    = EnerPres  ; account for cut-off vdW scheme
+; Velocity generation
+gen_vel     = yes       ; assign velocities from Maxwell distribution
+gen_temp    = 300       ; temperature for Maxwell distribution
+gen_seed    = -1        ; generate a random seed
+EOF
+
+grompp_mpi -f nvt.mdp -c em.gro -p topol.top -n index.ndx -o nvt.tpr
+mpirun -np 8 mdrun_mpi -deffnm nvt -v
+
+cat > npt.mdp << EOF
+title       = Protein-ligand complex NVT equilibration 
+define      = -DPOSRES  ; position restrain the protein and ligand
+; Run parameters
+integrator  = md        ; leap-frog integrator
+nsteps      = 50000     ; 2 * 50000 = 100 ps
+dt          = 0.002     ; 2 fs
+; Output control
+nstxout     = 100       ; save coordinates every 0.2 ps
+nstvout     = 100       ; save velocities every 0.2 ps
+nstenergy   = 100       ; save energies every 0.2 ps
+nstlog      = 100       ; update log file every 0.2 ps
+energygrps  = Protein DRG
+; Bond parameters
+continuation    = yes           ; first dynamics run
+constraint_algorithm = lincs    ; holonomic constraints 
+constraints     = all-bonds     ; all bonds (even heavy atom-H bonds) constrained
+lincs_iter      = 1             ; accuracy of LINCS
+lincs_order     = 4             ; also related to accuracy
+; Neighborsearching
+ns_type     = grid      ; search neighboring grid cells
+nstlist     = 5         ; 10 fs
+rlist       = 0.9       ; short-range neighborlist cutoff (in nm)
+rcoulomb    = 0.9       ; short-range electrostatic cutoff (in nm)
+;rvdw        = 1.4       ; short-range van der Waals cutoff (in nm)
+; Electrostatics
+coulombtype     = PME       ; Particle Mesh Ewald for long-range electrostatics
+pme_order       = 4         ; cubic interpolation
+fourierspacing  = 0.16      ; grid spacing for FFT
+; Temperature coupling is on
+tcoupl      = V-rescale                     ; modified Berendsen thermostat
+tc-grps     = Protein_DRG Water_and_ions    ; two coupling groups - more accurate
+tau_t       = 0.1   0.1                     ; time constant, in ps
+ref_t       = 300   300                     ; reference temperature, one for each group, in K
+; Pressure coupling is off
+pcoupl      = Parrinello-Rahman             ; pressure coupling is on for NPT
+pcoupltype  = isotropic                     ; uniform scaling of box vectors
+tau_p       = 2.0                           ; time constant, in ps
+ref_p       = 1.0                           ; reference pressure, in bar
+compressibility = 4.5e-5                    ; isothermal compressibility of water, bar^-1
+; Periodic boundary conditions
+pbc         = xyz       ; 3-D PBC
+; Dispersion correction
+DispCorr    = EnerPres  ; account for cut-off vdW scheme
+; Velocity generation
+gen_vel     = no        ; velocity generation off after NVT 
+cutoff-scheme	= Verlet
+EOF
+
+cat > md.mdp << EOF
+title       = Protein-ligand complex MD simulation 
+; Run parameters
+integrator  = md        ; leap-frog integrator
+nsteps      = 500000    ; 2 * 500000 = 1000 ps (1 ns)
+dt          = 0.002     ; 2 fs
+; Output control
+nstxout             = 0         ; suppress .trr output 
+nstvout             = 0         ; suppress .trr output
+nstenergy           = 5000      ; save energies every 10.0 ps
+nstlog              = 5000      ; update log file every 10.0 ps
+nstxtcout = 5000      ; write .xtc trajectory every 10.0 ps
+xtc-grps   = System
+energygrps          = Protein DRG
+; Bond parameters
+continuation    = yes           ; first dynamics run
+constraint_algorithm = lincs    ; holonomic constraints 
+constraints     = all-bonds     ; all bonds (even heavy atom-H bonds) constrained
+lincs_iter      = 1             ; accuracy of LINCS
+lincs_order     = 4             ; also related to accuracy
+; Neighborsearching
+cutoff-scheme   = Verlet
+ns_type         = grid      ; search neighboring grid cells
+nstlist         = 10        ; 20 fs, largely irrelevant with Verlet
+rcoulomb        = 1.4       ; short-range electrostatic cutoff (in nm)
+rvdw            = 1.4       ; short-range van der Waals cutoff (in nm)
+; Electrostatics
+coulombtype     = PME       ; Particle Mesh Ewald for long-range electrostatics
+pme_order       = 4         ; cubic interpolation
+fourierspacing  = 0.16      ; grid spacing for FFT
+; Temperature coupling
+tcoupl      = V-rescale                     ; modified Berendsen thermostat
+tc-grps     = Protein_DRG Water_and_ions    ; two coupling groups - more accurate
+tau_t       = 0.1   0.1                     ; time constant, in ps
+ref_t       = 300   300                     ; reference temperature, one for each group, in K
+; Pressure coupling 
+pcoupl      = Parrinello-Rahman             ; pressure coupling is on for NPT
+pcoupltype  = isotropic                     ; uniform scaling of box vectors
+tau_p       = 2.0                           ; time constant, in ps
+ref_p       = 1.0                           ; reference pressure, in bar
+compressibility = 4.5e-5                    ; isothermal compressibility of water, bar^-1
+; Periodic boundary conditions
+pbc         = xyz       ; 3-D PBC
+; Dispersion correction
+DispCorr    = EnerPres  ; account for cut-off vdW scheme
+; Velocity generation
+gen_vel     = no        ; assign velocities from Maxwell distribution
+EOF
